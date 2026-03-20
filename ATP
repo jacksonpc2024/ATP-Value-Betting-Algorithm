@@ -1,3 +1,7 @@
+git mv ATP ATP.py
+git commit -m "Rename ATP to ATP.py"
+git push
+
 import os
 import numpy as py
 import pandas as pd 
