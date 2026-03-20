@@ -13,9 +13,13 @@ This is a value betting strategy — the goal is not to predict winners, but to 
 **Results (Backtested 2020–2024)**
 
 Bets placed: 106
+
 ROI: 34.72%
+
 Stake: $20 flat per bet
+
 Total profit: $736
+
 Edge threshold: 20%
 
 A Monte Carlo simulation of 1,000 paths over 250 bets confirms positive expected value with realistic downside scenarios.
