@@ -1,0 +1,176 @@
+import os
+import numpy as py
+import pandas as pd 
+import glob
+
+path='tennis_atp-master'
+files=sorted(glob.glob(os.path.join(path, 'atp_matches_20*.csv')))
+#print(files)
+dfs = []
+for f in files:
+    temp=pd.read_csv(f, low_memory=False)
+    dfs.append(temp)
+
+df=pd.concat(dfs, ignore_index=True)
+#print(df.head())
+df['tourney_date'] = pd.to_datetime(df['tourney_date'], format='%Y%m%d')
+df = df[~df['score'].str.contains('RET|W/O', na=True)]
+df=df.dropna(subset=['winner_rank', 'loser_rank'])
+#print(f"clean matches: {len(df):,}")
+
+from collections import defaultdict
+k=32
+elo = defaultdict(lambda: 1500)
+def expected_score(ra, rb):
+    return 1 / (1 + 10 ** ((rb - ra) / 400))
+results = []
+
+cutoff = pd.Timestamp('2020-01-01')
+train_df = df[df['tourney_date'] < cutoff]
+test_df = df[df['tourney_date'] >= cutoff]
+
+def convert_name(full_name):
+    parts = full_name.strip().split()
+    if len(parts) >= 2:
+        last_name = parts[-1]
+        first_initial = parts[0][0]
+        return f"{last_name} {first_initial}."
+    return full_name
+
+for _, row in df.iterrows():
+    winner = row['winner_name']
+    loser = row['loser_name']
+    
+    elo_favored_winner=elo[winner]>elo[loser]
+
+    results.append({
+        'tourney_date': row['tourney_date'],
+        'winner': winner,
+        'loser': loser,
+        'actual_winner': winner,
+        'actual_loser': loser,
+        'winner_elo': elo[winner],
+        'loser_elo': elo[loser],
+        'expected_winner': expected_score(elo[winner], elo[loser]),
+        'player_won': True,
+        'surface': row['surface'],
+        'B365W': row.get('B365W'),
+        'B365L': row.get('B365L'),
+    })
+    results.append({
+        'tourney_date': row['tourney_date'],
+        'winner': loser,
+        'loser': winner,
+        'actual_winner': winner,
+        'actual_loser': loser,
+        'winner_elo': elo[loser],
+        'loser_elo': elo[winner],
+        'expected_winner':1 - expected_score(elo[loser], elo[winner]),
+        'player_won': False,
+        'surface': row['surface'],
+        'B365W': row.get('B365L'),
+        'B365L': row.get('B365W'),
+    })
+       
+    ew=expected_score(elo[winner], elo[loser])
+    elo[winner] += k * (1 - ew)
+    elo[loser] += k * (0 - (1 - ew))
+df = df.sort_values('tourney_date').reset_index(drop=True)
+
+elo_df = pd.DataFrame(results)
+elo_df['actual_winner_converted'] = elo_df['actual_winner'].apply(convert_name)
+elo_df['actual_loser_converted'] = elo_df['actual_loser'].apply(convert_name)
+elo_df['tourney_date'] = pd.to_datetime(elo_df['tourney_date'])
+
+odds_path = 'tennis-odds'
+odds_files = sorted(glob.glob(os.path.join(odds_path, '*.xlsx')))
+odds_dfs = []
+for f in odds_files:
+    temp = pd.read_excel(f)
+    if len(temp) > 0:
+        odds_dfs.append(temp)
+
+odds_df = pd.concat(odds_dfs, ignore_index=True)
+odds_df['Date'] = pd.to_datetime(odds_df['Date'])
+
+merged_df = elo_df.merge(
+    odds_df[['Winner', 'Loser', 'B365W', 'B365L', 'PSW', 'PSL', 'Date']],
+    left_on=['actual_winner_converted', 'actual_loser_converted', 'tourney_date'],
+    right_on=['Winner', 'Loser', 'Date'],
+    how='left'
+)
+
+print(f"Total matches: {len(merged_df):,}")
+print(f"Matches with odds: {merged_df['B365W_y'].notna().sum():,}")
+
+merged_df['b365_prob'] = 1 / merged_df['B365W_y']
+merged_df['edge'] = merged_df['expected_winner'] - merged_df['b365_prob']
+
+bets_df = merged_df.dropna(subset=['B365W_y', 'edge']).copy()
+
+stake=20
+for threshold in [0.20, 0.25, 0.30, 0.35, 0.40]:
+    temp_bets = bets_df[bets_df['edge'] > threshold].copy()
+    temp_bets['bet_won'] = temp_bets['player_won']
+    temp_bets['profit'] = temp_bets.apply(
+        lambda row: (row['B365W_y'] - 1) * stake if row['bet_won'] else -stake, axis=1)
+    roi = (temp_bets['profit'].sum() / (len(temp_bets) * stake)) * 100
+    print(f"Threshold {threshold:.0%} | Bets: {len(temp_bets)} | ROI: {roi:.2f}%")
+
+threshold = 0.20
+bets = bets_df[bets_df['edge'] > threshold].copy()
+bets['bet_won'] = bets['player_won']
+bets['profit'] = bets.apply(
+    lambda row: (row['B365W_y'] - 1) * stake if row['bet_won'] else -stake, axis=1)
+bets['cumulative_profit'] = bets['profit'].cumsum()
+
+total_profit = bets['profit'].sum()
+roi = (total_profit / (len(bets) * stake)) * 100
+
+print(f"\nTotal profit: ${total_profit:.2f}")
+print(f"ROI: {roi:.2f}%")
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+avg_odds = bets['B365W_y'].mean()
+avg_edge = bets['edge'].mean()
+
+avg_win_prob = bets['expected_winner'].mean()
+
+print(f"Avg win probability: {avg_win_prob:.3f}")
+print(f"Avg odds: {avg_odds:.3f}")
+print(f"Avg edge: {avg_edge:.3f}")
+
+n_simulations = 1000
+n_bets = 250
+bankroll = 1000
+
+paths = []
+for _ in range(n_simulations):
+    bankroll_path = [bankroll]
+    for _ in range(n_bets):
+        won = np.random.random() < bets['bet_won'].mean()   
+        if won:
+            bankroll_path.append(bankroll_path[-1] + (avg_odds - 1))
+        else:
+            bankroll_path.append(bankroll_path[-1] - 1)
+    paths.append(bankroll_path)
+
+paths = np.array(paths)
+
+percentiles = np.percentile(paths, np.arange(5, 100, 1), axis=0)
+
+plt.figure(figsize=(12, 6))
+
+colors = plt.cm.rainbow(np.linspace(0, 1, len(paths)))
+
+for path, color in zip(paths, colors):
+    plt.plot(path, alpha=0.5, color=color, linewidth=1)
+
+plt.plot(percentiles[len(percentiles)//2], color='blue', linewidth=1, label='Median')
+plt.axhline(y=bankroll, color='black', linestyle='--', label='Starting bankroll')
+plt.title('ATP Value Betting - Monte Carlo Simulation(1000 paths)')
+plt.xlabel('Number of bets')
+plt.ylabel('Bankroll ($)')
+plt.show()
